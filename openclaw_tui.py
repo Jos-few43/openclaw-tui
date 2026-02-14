@@ -492,6 +492,48 @@ def fetch_gateway_status() -> dict:
         return {"gateway": "ERR", "pid": "?", "sessions": "?", "agents": "?", "version": "?"}
 
 
+class DataLayer:
+    def __init__(self):
+        self._log_queue: queue.Queue = queue.Queue(maxsize=500)
+        self._tailer = LogTailer(self._log_queue)
+        self._status: dict = {}
+        self._profiles: list = []
+
+    def start(self):
+        self._tailer.start()
+
+    def stop(self):
+        self._tailer.stop()
+
+    def refresh(self):
+        """Fetch fresh data from openclaw CLI + auth-profiles.json."""
+        status = fetch_model_status()
+        if status:
+            self._status = status
+        self._profiles = read_auth_profiles()
+
+    @property
+    def rotation(self) -> list:
+        return self._status.get("rotation", [])
+
+    @property
+    def profiles(self) -> list:
+        return self._profiles
+
+    @property
+    def default_model(self) -> str:
+        return self._status.get("default", "")
+
+    def drain_logs(self) -> list[dict]:
+        events = []
+        while not self._log_queue.empty():
+            try:
+                events.append(self._log_queue.get_nowait())
+            except queue.Empty:
+                break
+        return events
+
+
 class DashboardScreen(Screen):
     BINDINGS = [
         Binding("ctrl+s", "switch_model", "Switch model"),
@@ -501,6 +543,12 @@ class DashboardScreen(Screen):
         Binding("ctrl+p", "goto_providers", "Providers"),
         Binding("ctrl+q", "quit_app", "Quit"),
     ]
+
+    verbose: reactive[bool] = reactive(False)
+
+    def __init__(self, data: "DataLayer", **kwargs):
+        super().__init__(**kwargs)
+        self._data = data
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header-row"):
@@ -513,18 +561,67 @@ class DashboardScreen(Screen):
             with ScrollableContainer(id="auth-panel"):
                 yield AuthPanelWidget(id="auth-widget")
         yield Static(" LOG  [FILTERED]", id="log-header")
-        yield RichLog(id="log-panel", highlight=True, markup=True)
+        yield RichLog(id="log-panel", highlight=True, markup=True, max_lines=200)
         yield Static(
             " ^S:switch  ^R:restart  ^C:clear-cooldown  ^V:verbose  ^P:providers  ^Q:quit",
             id="footer-bar"
         )
 
-    def action_goto_providers(self): self.app.push_screen("providers")
+    def on_mount(self):
+        self.set_interval(2.0, self._refresh_data)
+        self.set_interval(0.5, self._drain_logs)
+        self.set_interval(30.0, self._refresh_gateway)
+        # Initial load
+        self._data.refresh()
+        self._refresh_gateway()
+        self._update_widgets()
+
+    def _refresh_data(self):
+        self._data.refresh()
+        self._update_widgets()
+
+    def _update_widgets(self):
+        self.query_one("#model-table", ModelTableWidget).rotation = self._data.rotation
+        self.query_one("#auth-widget", AuthPanelWidget).profiles = self._data.profiles
+
+    def _refresh_gateway(self):
+        status = fetch_gateway_status()
+        self.query_one("#gateway-status", GatewayStatusWidget).status = status
+
+    def _drain_logs(self):
+        log = self.query_one("#log-panel", RichLog)
+        header = self.query_one("#log-header", Static)
+        mode = "[VERBOSE]" if self.verbose else "[FILTERED]"
+        header.update(f" LOG  {mode}")
+        for event in self._data.drain_logs():
+            if not self.verbose and not event["important"]:
+                continue
+            level = event["level"]
+            subsys = event["subsystem"]
+            msg = event["message"]
+            ts = event["time"][11:19]  # HH:MM:SS
+
+            if level == "ERROR" or "error" in subsys:
+                style = "red"
+            elif subsys in ("ratelimit", "fallback"):
+                style = "yellow"
+            elif subsys == "model":
+                style = "cyan"
+            else:
+                style = "dim white"
+
+            log.write(
+                f"[dim]{ts}[/]  [{style}]{subsys:<12}[/] {msg[:80]}"
+            )
+
+    def action_toggle_verbose(self):
+        self.verbose = not self.verbose
+
+    def action_goto_providers(self): self.app.push_screen(ProviderScreen(self._data))
     def action_quit_app(self): self.app.exit()
-    def action_toggle_verbose(self): pass
-    def action_switch_model(self): pass
-    def action_restart_gateway(self): pass
-    def action_clear_cooldown(self): pass
+    def action_switch_model(self): pass    # Task 10
+    def action_restart_gateway(self): pass  # Task 11
+    def action_clear_cooldown(self): pass   # Task 12
 
 
 class ProviderScreen(Screen):
@@ -533,6 +630,10 @@ class ProviderScreen(Screen):
         Binding("ctrl+d", "remove_provider", "Remove"),
         Binding("ctrl+q", "go_back", "Back"),
     ]
+
+    def __init__(self, data: "DataLayer", **kwargs):
+        super().__init__(**kwargs)
+        self._data = data
 
     def compose(self) -> ComposeResult:
         yield Static("PROVIDERS - placeholder", id="banner")
@@ -544,10 +645,14 @@ class ProviderScreen(Screen):
 
 class OpenClawTUI(App):
     CSS = APP_CSS
-    SCREENS = {"dashboard": DashboardScreen, "providers": ProviderScreen}
 
     def on_mount(self):
-        self.push_screen("dashboard")
+        self._data = DataLayer()
+        self._data.start()
+        self.push_screen(DashboardScreen(self._data))
+
+    def on_unmount(self):
+        self._data.stop()
 
 
 if __name__ == "__main__":
