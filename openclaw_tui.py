@@ -10,6 +10,119 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.screen import Screen, ModalScreen
+from textual.widgets import DataTable, Footer, Header, RichLog, Static, Input, Label, ListView, ListItem
+from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
+from textual.reactive import reactive
+from rich.text import Text
+from rich.style import Style
+
+APP_CSS = """
+Screen {
+    background: #0a0a0f;
+}
+
+#banner {
+    color: $accent;
+    height: auto;
+    padding: 0 1;
+}
+
+#gateway-status {
+    dock: right;
+    width: 22;
+    height: auto;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#main-grid {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#model-panel {
+    width: 62%;
+    border: tall $panel;
+    padding: 0 1;
+}
+
+#auth-panel {
+    width: 38%;
+    border: tall $panel;
+    padding: 0 1;
+    overflow-y: auto;
+}
+
+#log-panel {
+    height: 9;
+    border: tall $panel;
+    padding: 0 1;
+}
+
+#log-header {
+    dock: top;
+    height: 1;
+    color: $text-muted;
+}
+
+#model-table {
+    height: 1fr;
+}
+
+.panel-title {
+    color: $text;
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+/* Overlays */
+SwitchModelScreen, ClearCooldownScreen, RestartConfirmScreen, AddProviderWizard {
+    align: center middle;
+}
+
+.modal-box {
+    width: 44;
+    border: double $accent;
+    background: #12121a;
+    padding: 1 2;
+}
+
+.modal-title {
+    text-style: bold;
+    color: $accent;
+    text-align: center;
+    padding-bottom: 1;
+}
+
+.modal-hint {
+    color: $text-muted;
+    text-align: center;
+    padding-bottom: 1;
+}
+
+.modal-footer {
+    color: $text-muted;
+    text-align: center;
+    padding-top: 1;
+}
+
+/* Provider screen */
+#provider-list {
+    width: 35%;
+    border: tall $panel;
+    padding: 0 1;
+}
+
+#provider-detail {
+    width: 65%;
+    border: tall $panel;
+    padding: 0 1;
+}
+"""
+
 # ── Paths ──────────────────────────────────────────────────────────────
 HOME = Path.home()
 OPENCLAW_JSON   = HOME / ".openclaw/openclaw.json"
@@ -191,5 +304,49 @@ class LogTailer:
                 self._stop.wait(1)
 
 
+class DashboardScreen(Screen):
+    BINDINGS = [
+        Binding("ctrl+s", "switch_model", "Switch model"),
+        Binding("ctrl+r", "restart_gateway", "Restart gateway"),
+        Binding("ctrl+c", "clear_cooldown", "Clear cooldown", show=True),
+        Binding("ctrl+v", "toggle_verbose", "Toggle verbose"),
+        Binding("ctrl+p", "goto_providers", "Providers"),
+        Binding("ctrl+q", "quit_app", "Quit"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Static("DASHBOARD - placeholder", id="banner")
+
+    def action_goto_providers(self): self.app.push_screen("providers")
+    def action_quit_app(self): self.app.exit()
+    def action_toggle_verbose(self): pass
+    def action_switch_model(self): pass
+    def action_restart_gateway(self): pass
+    def action_clear_cooldown(self): pass
+
+
+class ProviderScreen(Screen):
+    BINDINGS = [
+        Binding("ctrl+n", "new_provider", "New provider"),
+        Binding("ctrl+d", "remove_provider", "Remove"),
+        Binding("ctrl+q", "go_back", "Back"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Static("PROVIDERS - placeholder", id="banner")
+
+    def action_go_back(self): self.app.pop_screen()
+    def action_new_provider(self): pass
+    def action_remove_provider(self): pass
+
+
+class OpenClawTUI(App):
+    CSS = APP_CSS
+    SCREENS = {"dashboard": DashboardScreen, "providers": ProviderScreen}
+
+    def on_mount(self):
+        self.push_screen("dashboard")
+
+
 if __name__ == "__main__":
-    print("scaffold ok")
+    OpenClawTUI().run()
