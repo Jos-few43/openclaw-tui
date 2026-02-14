@@ -110,6 +110,11 @@ SwitchModelScreen, ClearCooldownScreen, RestartConfirmScreen, AddProviderWizard 
 }
 
 /* Provider screen */
+#provider-grid {
+    height: 1fr;
+    layout: horizontal;
+}
+
 #provider-list {
     width: 35%;
     border: tall $panel;
@@ -492,6 +497,39 @@ def fetch_gateway_status() -> dict:
         return {"gateway": "ERR", "pid": "?", "sessions": "?", "agents": "?", "version": "?"}
 
 
+def _load_providers() -> list[dict]:
+    """Read provider list from openclaw.json."""
+    try:
+        cfg = json.loads(OPENCLAW_JSON.read_text())
+        providers_cfg = cfg.get("models", {}).get("providers", {})
+        auth_profiles = json.loads(AUTH_PROFILES.read_text())
+        result = []
+        for pid, pdata in providers_cfg.items():
+            oauth_count = sum(
+                1 for p in auth_profiles.get("profiles", {}).values()
+                if p.get("provider") == pid and p.get("type") == "oauth"
+            )
+            api_key = pdata.get("apiKey", "")
+            if oauth_count:
+                auth_tag = f"OAUTH {oauth_count}"
+            elif api_key and api_key != "from-auth-profiles":
+                auth_tag = "API KEY"
+            elif pdata.get("baseUrl", "").startswith("http://127") or pdata.get("baseUrl", "").startswith("http://localhost"):
+                auth_tag = "LOCAL  "
+            else:
+                auth_tag = "CUSTOM "
+            result.append({
+                "id": pid,
+                "base_url": pdata.get("baseUrl", ""),
+                "api_key": api_key,
+                "models": pdata.get("models", []),
+                "auth_tag": auth_tag,
+            })
+        return result
+    except Exception:
+        return []
+
+
 class SwitchModelScreen(ModalScreen):
     BINDINGS = [
         Binding("escape", "dismiss", "Cancel"),
@@ -845,19 +883,130 @@ class ProviderScreen(Screen):
     BINDINGS = [
         Binding("ctrl+n", "new_provider", "New provider"),
         Binding("ctrl+d", "remove_provider", "Remove"),
+        Binding("ctrl+x", "toggle_provider", "Enable/Disable"),
         Binding("ctrl+q", "go_back", "Back"),
     ]
 
     def __init__(self, data: "DataLayer", **kwargs):
         super().__init__(**kwargs)
         self._data = data
+        self._providers: list[dict] = []
+        self._cursor = 0
 
     def compose(self) -> ComposeResult:
-        yield Static("PROVIDERS - placeholder", id="banner")
+        yield Static(" PROVIDER MANAGER           ^N:new  ^D:remove  ^X:toggle  ^Q:back",
+                     id="provider-header")
+        with Horizontal(id="provider-grid"):
+            with Vertical(id="provider-list"):
+                yield Static(" PROVIDERS", classes="panel-title")
+                yield Static(id="provider-list-body")
+            with ScrollableContainer(id="provider-detail"):
+                yield Static(id="provider-detail-body")
+
+    def on_mount(self):
+        self._providers = _load_providers()
+        self._render_list()
+        self._render_detail()
+
+    def _render_list(self):
+        from rich.text import Text, Group
+        lines = []
+        for i, p in enumerate(self._providers):
+            tag = p["auth_tag"]
+            if "OAUTH" in tag: tag_style = "cyan"
+            elif "API" in tag: tag_style = "yellow"
+            elif "LOCAL" in tag: tag_style = "green"
+            else: tag_style = "dim white"
+
+            t = Text()
+            if i == self._cursor:
+                t.append("►", style="bold cyan")
+                t.append(f" {p['id']:<22}", style="bold cyan on #1a2a3a")
+                t.append(f" [{tag}]", style=f"bold {tag_style} on #1a2a3a")
+            else:
+                t.append(f"  {p['id']:<22}", style="dim white")
+                t.append(f" [{tag}]", style=tag_style)
+            lines.append(t)
+
+        lines.append(Text(""))
+        add_t = Text()
+        add_t.append("  + Add new provider", style="dim cyan")
+        lines.append(add_t)
+        from rich.console import Group as G
+        self.query_one("#provider-list-body", Static).update(G(*lines))
+
+    def _render_detail(self):
+        if not self._providers:
+            self.query_one("#provider-detail-body", Static).update("  No providers configured")
+            return
+        p = self._providers[self._cursor]
+        from rich.text import Text, Group
+        lines = [
+            Text(f"\n  DETAILS  {p['id']}", style="bold"),
+            Text(""),
+            Text(f"  provider    {p['id']}"),
+            Text(f"  base url    {p['base_url']}", style="dim"),
+        ]
+        if p["api_key"] and p["api_key"] != "from-auth-profiles":
+            masked = p["api_key"][:8] + "..." if len(p["api_key"]) > 8 else p["api_key"]
+            lines.append(Text(f"  api key     {masked}", style="yellow"))
+        if p["models"]:
+            lines.append(Text(""))
+            lines.append(Text("  models in rotation", style="bold"))
+            for m in p["models"]:
+                mid = m.get("id", "?")
+                ctx = m.get("contextWindow", 0)
+                ctx_str = f"{ctx // 1000}k" if ctx >= 1000 else str(ctx)
+                lines.append(Text(f"    {mid:<30} {ctx_str}", style="dim"))
+        lines.append(Text(""))
+        lines.append(Text("  Enter:edit  ^D:remove  ^X:disable", style="dim"))
+        from rich.console import Group as G
+        self.query_one("#provider-detail-body", Static).update(G(*lines))
+
+    def on_key(self, event):
+        if event.key == "up":
+            self._cursor = max(0, self._cursor - 1)
+            self._render_list(); self._render_detail()
+        elif event.key == "down":
+            self._cursor = min(len(self._providers) - 1, self._cursor + 1)
+            self._render_list(); self._render_detail()
 
     def action_go_back(self): self.app.pop_screen()
-    def action_new_provider(self): pass
-    def action_remove_provider(self): pass
+    def action_new_provider(self): self.app.push_screen(AddProviderWizard(), self._on_provider_added)
+    def action_remove_provider(self): self._remove_current()
+    def action_toggle_provider(self): pass  # Task 13
+
+    def _on_provider_added(self, result):
+        if result:
+            self._providers = _load_providers()
+            self._render_list()
+            self._render_detail()
+
+    def _remove_current(self):
+        if not self._providers: return
+        pid = self._providers[self._cursor]["id"]
+        try:
+            cfg = json.loads(OPENCLAW_JSON.read_text())
+            cfg.get("models", {}).get("providers", {}).pop(pid, None)
+            OPENCLAW_JSON.write_text(json.dumps(cfg, indent=2))
+        except Exception: pass
+        self._providers = _load_providers()
+        self._cursor = max(0, min(self._cursor, len(self._providers) - 1))
+        self._render_list()
+        self._render_detail()
+
+
+class AddProviderWizard(ModalScreen):
+    """Stub — full implementation in Task 13."""
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="modal-box"):
+            yield Static(" ADD PROVIDER (coming soon)", classes="modal-title")
+            yield Static(" Esc: cancel", classes="modal-footer")
+
+    def action_cancel(self):
+        self.dismiss(None)
 
 
 class OpenClawTUI(App):
