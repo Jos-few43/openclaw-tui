@@ -997,16 +997,195 @@ class ProviderScreen(Screen):
 
 
 class AddProviderWizard(ModalScreen):
-    """Stub — full implementation in Task 13."""
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._step = 1
+        self._type: str | None = None
+        self._type_cursor = 0
+        self._form: dict = {}
+        self._confirm_cursor = 0
+        self._waiting_oauth = False
+
     def compose(self) -> ComposeResult:
-        with Container(classes="modal-box"):
-            yield Static(" ADD PROVIDER (coming soon)", classes="modal-title")
-            yield Static(" Esc: cancel", classes="modal-footer")
+        with Container(classes="modal-box", id="wizard-box"):
+            yield Static(id="wizard-title", classes="modal-title")
+            yield Static(id="wizard-body")
+            yield Container(id="wizard-inputs")
+            yield Static(id="wizard-footer", classes="modal-footer")
+
+    def on_mount(self): self._render()
+
+    def _render(self):
+        title_w = self.query_one("#wizard-title", Static)
+        body_w = self.query_one("#wizard-body", Static)
+        footer_w = self.query_one("#wizard-footer", Static)
+        inputs_c = self.query_one("#wizard-inputs", Container)
+
+        # Clear inputs
+        for child in list(inputs_c.children):
+            child.remove()
+
+        if self._step == 1:
+            title_w.update(f" ADD PROVIDER  (1/3)")
+            footer_w.update(" Up/Down  Enter:select  Esc:cancel")
+            self._render_type_select(body_w)
+            inputs_c.display = False
+
+        elif self._step == 2 and self._type == "apikey":
+            title_w.update(f" ADD PROVIDER  (2/3) — API Key")
+            body_w.update("")
+            footer_w.update(" Tab:next  Shift+Tab:prev  Enter:confirm  Esc:cancel")
+            inputs_c.display = True
+            inputs_c.mount(Label("  Provider name"))
+            inputs_c.mount(Input(placeholder="groq", id="inp-name"))
+            inputs_c.mount(Label("  Base URL"))
+            inputs_c.mount(Input(placeholder="https://api.groq.com/openai/v1", id="inp-url"))
+            inputs_c.mount(Label("  API Key"))
+            inputs_c.mount(Input(placeholder="sk-...", password=True, id="inp-key"))
+
+        elif self._step == 2 and self._type == "oauth":
+            title_w.update(" ADD PROVIDER  (2/3) — OAuth")
+            from rich.text import Text, Group
+            lines = [
+                Text("\n  Launching browser auth..."),
+                Text("  (Paste URL in browser if it does not open)\n"),
+                Text("  Run manually:"),
+                Text("  openclaw models auth login\n", style="cyan"),
+                Text(f"  {make_bar(0, 36)}", style="cyan"),
+                Text("  Waiting for browser callback...", style="dim"),
+            ]
+            from rich.console import Group as G
+            body_w.update(G(*lines))
+            inputs_c.display = False
+            footer_w.update(" Esc:cancel")
+            # Trigger oauth flow in thread
+            if not self._waiting_oauth:
+                self._waiting_oauth = True
+                threading.Thread(target=self._run_oauth, daemon=True).start()
+
+        elif self._step == 2 and self._type == "custom":
+            title_w.update(" ADD PROVIDER  (2/3) — Custom")
+            body_w.update("")
+            footer_w.update(" Tab:next  Enter:next field  Esc:cancel")
+            inputs_c.display = True
+            inputs_c.mount(Label("  Provider ID"))
+            inputs_c.mount(Input(placeholder="my-provider", id="inp-name"))
+            inputs_c.mount(Label("  Base URL"))
+            inputs_c.mount(Input(placeholder="http://localhost:8080/v1", id="inp-url"))
+            inputs_c.mount(Label("  API Key (optional)"))
+            inputs_c.mount(Input(placeholder="sk-...", password=True, id="inp-key"))
+
+        elif self._step == 3:
+            title_w.update(" ADD PROVIDER  (3/3) — Confirm")
+            f = self._form
+            from rich.text import Text, Group
+            lines = [
+                Text(f"\n  Provider   {f.get('name', '?')}"),
+                Text(f"  Base URL   {f.get('url', '?')}", style="dim"),
+            ]
+            if f.get("key"):
+                lines.append(Text(f"  API Key    {f['key'][:6]}****", style="yellow"))
+            lines.append(Text(""))
+            body_w.update(Group(*lines))
+            self._render_confirm_choices(inputs_c)
+            inputs_c.display = True
+            footer_w.update(" Up/Down  Enter:confirm  Esc:cancel")
+
+    def _render_type_select(self, widget):
+        opts = [
+            ("API Key", "Groq, OpenCode, custom endpoints"),
+            ("OAuth",   "Google, Qwen browser-based login"),
+            ("Custom",  "New OpenAI-compatible endpoint"),
+        ]
+        from rich.text import Text, Group
+        lines = [Text("  Select provider type\n")]
+        for i, (name, desc) in enumerate(opts):
+            t = Text()
+            if i == self._type_cursor:
+                t.append("► ", style="bold cyan")
+                t.append(f"{name:<12}", style="bold cyan on #1a2a3a")
+                t.append(f"  {desc}", style="dim cyan on #1a2a3a")
+            else:
+                t.append(f"   {name:<12}", style="dim white")
+                t.append(f"  {desc}", style="dim")
+            lines.append(t)
+        widget.update(Group(*lines))
+
+    def _render_confirm_choices(self, container):
+        for child in list(container.children):
+            child.remove()
+        opts = ["Add and include in rotation", "Add without adding to rotation", "Cancel"]
+        from rich.text import Text, Group
+        lines = []
+        for i, opt in enumerate(opts):
+            t = Text()
+            if i == self._confirm_cursor:
+                t.append("► ", style="bold cyan")
+                t.append(opt, style="bold cyan on #1a2a3a")
+            else:
+                t.append(f"   {opt}", style="dim white")
+            lines.append(t)
+        container.mount(Static(Group(*lines)))
+
+    def _run_oauth(self):
+        subprocess.run(["openclaw", "models", "auth", "login"],
+                       capture_output=True, timeout=120)
+        self.app.call_from_thread(self.dismiss, {"oauth": True})
+
+    def on_key(self, event):
+        if self._step == 1:
+            if event.key == "up": self._type_cursor = max(0, self._type_cursor - 1); self._render()
+            elif event.key == "down": self._type_cursor = min(2, self._type_cursor + 1); self._render()
+            elif event.key == "enter":
+                self._type = ["apikey", "oauth", "custom"][self._type_cursor]
+                self._step = 2; self._render()
+        elif self._step == 2 and self._type in ("apikey", "custom"):
+            if event.key == "enter":
+                try:
+                    self._form["name"] = self.query_one("#inp-name", Input).value
+                    self._form["url"]  = self.query_one("#inp-url", Input).value
+                    self._form["key"]  = self.query_one("#inp-key", Input).value
+                    if self._form["name"] and self._form["url"]:
+                        self._step = 3; self._render()
+                except Exception: pass
+        elif self._step == 3:
+            if event.key == "up": self._confirm_cursor = max(0, self._confirm_cursor - 1); self._render()
+            elif event.key == "down": self._confirm_cursor = min(2, self._confirm_cursor + 1); self._render()
+            elif event.key == "enter": self._confirm()
+
+    def _confirm(self):
+        if self._confirm_cursor == 2:
+            self.dismiss(None); return
+        f = self._form
+        add_to_rotation = (self._confirm_cursor == 0)
+        _write_new_provider(f["name"], f["url"], f.get("key", ""), add_to_rotation)
+        self.dismiss({"added": f["name"]})
 
     def action_cancel(self):
         self.dismiss(None)
+
+
+def _write_new_provider(name: str, base_url: str, api_key: str, add_to_rotation: bool):
+    """Write a new provider entry to openclaw.json."""
+    try:
+        cfg = json.loads(OPENCLAW_JSON.read_text())
+        providers = cfg.setdefault("models", {}).setdefault("providers", {})
+        providers[name] = {
+            "baseUrl": base_url,
+            "apiKey": api_key or "from-auth-profiles",
+            "api": "openai-completions",
+            "models": []
+        }
+        if add_to_rotation:
+            fallbacks = cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault(
+                "model", {}).setdefault("fallbacks", [])
+            # Add a placeholder model entry
+            fallbacks.append(f"{name}/default")
+        OPENCLAW_JSON.write_text(json.dumps(cfg, indent=2))
+    except Exception:
+        pass
 
 
 class OpenClawTUI(App):
