@@ -492,6 +492,100 @@ def fetch_gateway_status() -> dict:
         return {"gateway": "ERR", "pid": "?", "sessions": "?", "agents": "?", "version": "?"}
 
 
+class SwitchModelScreen(ModalScreen):
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel"),
+        Binding("enter", "select", "Select"),
+    ]
+
+    def __init__(self, rotation: list[dict], **kwargs):
+        super().__init__(**kwargs)
+        self._rotation = rotation
+        self._cursor = 0
+        self._filter = ""
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="modal-box"):
+            yield Static(" SWITCH MODEL", classes="modal-title")
+            yield Static(
+                " Up/Down navigate   /: filter   Enter: select",
+                classes="modal-hint"
+            )
+            yield Static(id="model-list-body")
+            yield Static(" Esc: cancel", classes="modal-footer")
+
+    def on_mount(self):
+        self._render_list()
+
+    def _filtered(self) -> list[dict]:
+        if not self._filter:
+            return self._rotation
+        return [e for e in self._rotation if self._filter.lower() in e["label"].lower()]
+
+    def _render_list(self):
+        from rich.text import Text
+        entries = self._filtered()
+        lines = []
+        for i, e in enumerate(entries):
+            status = e["status"]
+            is_active = status == "ACTIVE"
+            is_local = e["model"].startswith("ollama/")
+
+            if status == "ACTIVE":
+                tag = "[ACTIVE]"
+                tag_style = "bold cyan"
+            elif is_local:
+                tag = "[LOCAL] "
+                tag_style = "bold green"
+            else:
+                tag = f" {status:<7}"
+                tag_style = "dim white"
+
+            row = Text()
+            if i == self._cursor:
+                row.append("►", style="bold cyan")
+                row.append(f" {tag} ", style=tag_style)
+                row.append(e["label"], style="bold cyan on #1a2a3a")
+            else:
+                row.append("  ")
+                row.append(f" {tag} ", style=tag_style)
+                row.append(e["label"], style="dim white" if not is_local else "green")
+
+            lines.append(row)
+
+        from rich.console import Group
+        self.query_one("#model-list-body", Static).update(Group(*lines))
+
+    def on_key(self, event):
+        entries = self._filtered()
+        if event.key == "up":
+            self._cursor = max(0, self._cursor - 1)
+            self._render_list()
+        elif event.key == "down":
+            self._cursor = min(len(entries) - 1, self._cursor + 1)
+            self._render_list()
+        elif event.key == "slash":
+            self._filter = ""
+            self._render_list()
+        elif len(event.key) == 1 and event.key.isprintable() and event.key not in "\n\r":
+            # Typing filter
+            self._filter += event.key
+            self._cursor = 0
+            self._render_list()
+        elif event.key == "backspace" and self._filter:
+            self._filter = self._filter[:-1]
+            self._cursor = 0
+            self._render_list()
+
+    def action_select(self):
+        entries = self._filtered()
+        if entries:
+            self.dismiss(entries[self._cursor]["model"])
+
+    def action_dismiss_modal(self):
+        self.dismiss(None)
+
+
 class DataLayer:
     def __init__(self):
         self._log_queue: queue.Queue = queue.Queue(maxsize=500)
@@ -619,7 +713,14 @@ class DashboardScreen(Screen):
 
     def action_goto_providers(self): self.app.push_screen(ProviderScreen(self._data))
     def action_quit_app(self): self.app.exit()
-    def action_switch_model(self): pass    # Task 10
+    def action_switch_model(self):
+        def on_select(model: str | None):
+            if model:
+                subprocess.run(["openclaw", "models", "set", model],
+                               capture_output=True, timeout=8)
+                self._data.refresh()
+                self._update_widgets()
+        self.app.push_screen(SwitchModelScreen(self._data.rotation), on_select)
     def action_restart_gateway(self): pass  # Task 11
     def action_clear_cooldown(self): pass   # Task 12
 
