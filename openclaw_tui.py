@@ -586,6 +586,108 @@ class SwitchModelScreen(ModalScreen):
         self.dismiss(None)
 
 
+class RestartConfirmScreen(ModalScreen):
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._cursor = 0
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="modal-box"):
+            yield Static(" RESTART GATEWAY", classes="modal-title")
+            yield Static(
+                "\n  Restart the openclaw-gateway service?\n"
+                "  Active sessions will be interrupted.\n",
+                classes="modal-hint"
+            )
+            yield Static(id="confirm-body")
+            yield Static(" Esc: cancel", classes="modal-footer")
+
+    def on_mount(self): self._render()
+
+    def _render(self):
+        from rich.text import Text
+        opts = ["Confirm restart", "Cancel"]
+        lines = []
+        for i, opt in enumerate(opts):
+            t = Text()
+            if i == self._cursor:
+                t.append("►", style="bold cyan")
+                t.append(f"  {opt}", style="bold cyan on #1a2a3a")
+            else:
+                t.append(f"   {opt}", style="dim white")
+            lines.append(t)
+        from rich.console import Group
+        self.query_one("#confirm-body", Static).update(Group(*lines))
+
+    def on_key(self, event):
+        if event.key in ("up", "down"):
+            self._cursor = 1 - self._cursor
+            self._render()
+        elif event.key == "enter":
+            self.dismiss(self._cursor == 0)
+
+
+class ClearCooldownScreen(ModalScreen):
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    def __init__(self, profiles: list[dict], **kwargs):
+        super().__init__(**kwargs)
+        self._profiles = [p for p in profiles if p["in_cooldown"]]
+        self._cursor = 0
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="modal-box"):
+            yield Static(" CLEAR COOLDOWN", classes="modal-title")
+            yield Static(" Select account to clear", classes="modal-hint")
+            yield Static(id="cooldown-list")
+            yield Static(" Esc: cancel", classes="modal-footer")
+
+    def on_mount(self):
+        if not self._profiles:
+            self.query_one("#cooldown-list").update("  No accounts in cooldown")
+        else:
+            self._render()
+
+    def _render(self):
+        from rich.text import Text, Group
+        lines = []
+        for i, p in enumerate(self._profiles):
+            rem_s = int(p["cooldown_remaining_ms"] / 1000)
+            rem = f"{rem_s // 60}m {rem_s % 60:02d}s"
+            t = Text()
+            if i == self._cursor:
+                t.append("►", style="bold cyan")
+                t.append(f"  {p['profile_id']:<30} {rem}", style="bold red on #1a2a3a")
+            else:
+                t.append(f"   {p['profile_id']:<30} {rem}", style="red")
+            lines.append(t)
+        from rich.console import Group as G
+        self.query_one("#cooldown-list", Static).update(G(*lines))
+
+    def on_key(self, event):
+        if event.key == "up":
+            self._cursor = max(0, self._cursor - 1); self._render()
+        elif event.key == "down":
+            self._cursor = min(len(self._profiles) - 1, self._cursor + 1); self._render()
+        elif event.key == "enter" and self._profiles:
+            self.dismiss(self._profiles[self._cursor]["profile_id"])
+
+
+def _clear_cooldown_in_file(profile_id: str):
+    """Remove cooldownUntil for a profile in auth-profiles.json."""
+    try:
+        data = json.loads(AUTH_PROFILES.read_text())
+        stats = data.setdefault("usageStats", {})
+        if profile_id in stats:
+            stats[profile_id].pop("cooldownUntil", None)
+            stats[profile_id]["errorCount"] = 0
+        AUTH_PROFILES.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
+
+
 class DataLayer:
     def __init__(self):
         self._log_queue: queue.Queue = queue.Queue(maxsize=500)
@@ -721,8 +823,22 @@ class DashboardScreen(Screen):
                 self._data.refresh()
                 self._update_widgets()
         self.app.push_screen(SwitchModelScreen(self._data.rotation), on_select)
-    def action_restart_gateway(self): pass  # Task 11
-    def action_clear_cooldown(self): pass   # Task 12
+    def action_restart_gateway(self):
+        def on_confirm(confirmed: bool | None):
+            if confirmed:
+                subprocess.run(
+                    ["systemctl", "--user", "restart", "openclaw-gateway.service"],
+                    capture_output=True, timeout=15
+                )
+        self.app.push_screen(RestartConfirmScreen(), on_confirm)
+
+    def action_clear_cooldown(self):
+        def on_select(profile_id: str | None):
+            if profile_id:
+                _clear_cooldown_in_file(profile_id)
+                self._data.refresh()
+                self._update_widgets()
+        self.app.push_screen(ClearCooldownScreen(self._data.profiles), on_select)
 
 
 class ProviderScreen(Screen):
