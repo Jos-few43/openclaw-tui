@@ -381,6 +381,63 @@ class ModelTableWidget(Static):
         return t
 
 
+class AuthPanelWidget(Static):
+    profiles: reactive[list] = reactive([])
+
+    def render(self):
+        from rich.console import Group
+        from rich.text import Text
+
+        now_ms = datetime.now(timezone.utc).timestamp() * 1000
+        lines = [Text(" AUTH ACCOUNTS", style="bold")]
+
+        for p in self.profiles:
+            lines.append(Text(""))
+            pid = p["profile_id"]
+            short = pid.split(":")[-1][:22]
+            provider_short = p["provider"].removeprefix("google-")[:14]
+            label = f"{provider_short}:{short}"
+
+            if p["in_cooldown"]:
+                rem_s = int(p["cooldown_remaining_ms"] / 1000)
+                rem_fmt = f"{rem_s // 60}m {rem_s % 60:02d}s"
+                lines.append(Text(f"  {label}", style="bold red"))
+                lines.append(Text(f"  COOLDOWN  {rem_fmt} remaining", style="red"))
+                bar = make_bar(1.0)
+                lines.append(Text(f"  {bar}  100%", style="red"))
+            elif p["auth_type"] == "apiKey":
+                lines.append(Text(f"  {label}", style="yellow"))
+                key_hint = p.get("api_key") or "key set"
+                lines.append(Text(f"  API KEY  {key_hint}", style="dim yellow"))
+                lines.append(Text(f"  {make_bar(0)}  no exp", style="dim"))
+            else:
+                exp_ms = p.get("expires_ms")
+                if exp_ms:
+                    rem_ms = max(0, exp_ms - now_ms)
+                    # OAuth tokens typically last 1hr = 3_600_000ms
+                    pct = min(1.0, rem_ms / 3_600_000)
+                    rem_s = int(rem_ms / 1000)
+                    if rem_s <= 0:
+                        rem_fmt = "EXPIRED"
+                        pct = 0.0
+                    else:
+                        rem_fmt = f"{rem_s // 60}m {rem_s % 60:02d}s"
+                    color = bar_color(pct)
+                    pct_int = int(pct * 100)
+                    lines.append(Text(f"  {label}", style=color))
+                    lines.append(Text(f"  expires  {rem_fmt}", style="dim"))
+                    lines.append(Text(
+                        f"  {make_bar(pct)}  {pct_int}%",
+                        style=color
+                    ))
+                else:
+                    lines.append(Text(f"  {label}", style="cyan"))
+                    lines.append(Text("  OAuth  no expiry data", style="dim"))
+
+        from rich.console import Group as RGroup
+        return RGroup(*lines)
+
+
 class BannerWidget(Static):
     def render(self):
         from rich.text import Text
@@ -453,7 +510,8 @@ class DashboardScreen(Screen):
             with Vertical(id="model-panel"):
                 yield Static(" MODEL ROTATION", classes="panel-title")
                 yield ModelTableWidget(id="model-table")
-            yield Static("auth panel placeholder", id="auth-panel")
+            with ScrollableContainer(id="auth-panel"):
+                yield AuthPanelWidget(id="auth-widget")
         yield Static(" LOG  [FILTERED]", id="log-header")
         yield RichLog(id="log-panel", highlight=True, markup=True)
         yield Static(
