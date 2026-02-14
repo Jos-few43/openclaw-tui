@@ -304,6 +304,60 @@ class LogTailer:
                 self._stop.wait(1)
 
 
+class BannerWidget(Static):
+    def render(self):
+        from rich.text import Text
+        t = Text(BANNER, style="bold cyan")
+        return t
+
+
+class GatewayStatusWidget(Static):
+    status: reactive[dict] = reactive({})
+
+    def render(self):
+        s = self.status
+        pid = s.get("pid", "---")
+        sessions = s.get("sessions", "?")
+        agents = s.get("agents", "?")
+        version = s.get("version", "")
+        gw = s.get("gateway", "---")
+        lines = [
+            f" [dim]{version}[/]",
+            f" gateway: [{'green' if gw == 'RUN' else 'red'}]{gw}[/]",
+            f" pid: [dim]{pid}[/]",
+            f" sessions: [dim]{sessions}[/]",
+            f" agents: [dim]{agents}[/]",
+        ]
+        return "\n".join(lines)
+
+
+def fetch_gateway_status() -> dict:
+    """Parse `openclaw health` output."""
+    try:
+        r = subprocess.run(["openclaw", "health"], capture_output=True, text=True, timeout=8)
+        out = r.stdout
+        result = {"gateway": "RUN"}
+        for line in out.splitlines():
+            if "PID" in line or "pid" in line:
+                import re
+                m = re.search(r"(\d{4,})", line)
+                if m:
+                    result["pid"] = m.group(1)
+            elif "Session store" in line:
+                import re
+                m = re.search(r"\((\d+) entries\)", line)
+                if m:
+                    result["sessions"] = m.group(1)
+            elif line.strip().startswith("Agents:"):
+                agents = line.split(":", 1)[1].strip()
+                result["agents"] = len(agents.split(","))
+        ver_r = subprocess.run(["openclaw", "--version"], capture_output=True, text=True, timeout=4)
+        result["version"] = ver_r.stdout.strip()[:20]
+        return result
+    except Exception:
+        return {"gateway": "ERR", "pid": "?", "sessions": "?", "agents": "?", "version": "?"}
+
+
 class DashboardScreen(Screen):
     BINDINGS = [
         Binding("ctrl+s", "switch_model", "Switch model"),
@@ -315,7 +369,18 @@ class DashboardScreen(Screen):
     ]
 
     def compose(self) -> ComposeResult:
-        yield Static("DASHBOARD - placeholder", id="banner")
+        with Horizontal(id="header-row"):
+            yield BannerWidget(id="banner")
+            yield GatewayStatusWidget(id="gateway-status")
+        with Horizontal(id="main-grid"):
+            yield Static("model panel placeholder", id="model-panel")
+            yield Static("auth panel placeholder", id="auth-panel")
+        yield Static(" LOG  [FILTERED]", id="log-header")
+        yield RichLog(id="log-panel", highlight=True, markup=True)
+        yield Static(
+            " ^S:switch  ^R:restart  ^C:clear-cooldown  ^V:verbose  ^P:providers  ^Q:quit",
+            id="footer-bar"
+        )
 
     def action_goto_providers(self): self.app.push_screen("providers")
     def action_quit_app(self): self.app.exit()
