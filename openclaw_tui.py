@@ -304,6 +304,83 @@ class LogTailer:
                 self._stop.wait(1)
 
 
+def make_bar(pct: float, width: int = 18) -> str:
+    """Block-character progress bar: ▕████░░░░▏"""
+    pct = max(0.0, min(1.0, pct))
+    filled = round(pct * width)
+    return f"▕{'█' * filled}{'░' * (width - filled)}▏"
+
+def bar_color(pct: float) -> str:
+    if pct > 0.5: return "green"
+    if pct > 0.2: return "yellow"
+    return "red"
+
+CTX_MAP = {
+    "google-gemini-cli": "1024k",
+    "google-antigravity": "1024k",
+    "groq": "128k",
+    "qwen-portal": "125k",
+    "opencode": "256k",
+    "ollama": "125k",
+}
+
+def ctx_label(model_id: str, raw_ctx: int | None = None) -> str:
+    if raw_ctx:
+        if raw_ctx >= 1_000_000: return f"{raw_ctx // 1000}k"
+        if raw_ctx >= 1_000: return f"{raw_ctx // 1000}k"
+        return str(raw_ctx)
+    provider = model_id.split("/")[0]
+    # per-model overrides
+    if "deepseek" in model_id: return "16k"
+    if "gemma2-9b" in model_id: return "8k"
+    if "sonnet" in model_id or "claude" in model_id: return "195k"
+    return CTX_MAP.get(provider, "???")
+
+
+class ModelTableWidget(Static):
+    rotation: reactive[list] = reactive([])
+
+    def render(self):
+        from rich.table import Table
+        from rich.text import Text
+
+        t = Table(
+            show_header=True, header_style="bold dim",
+            box=None, padding=(0, 1), expand=True
+        )
+        t.add_column("NAME", style="", no_wrap=True, min_width=28)
+        t.add_column("CTX", justify="right", width=6)
+        t.add_column("STATUS", justify="left", width=10)
+
+        for entry in self.rotation:
+            model = entry["model"]
+            label = entry["label"]
+            status = entry["status"]
+            is_active = status == "ACTIVE"
+            provider = model.split("/")[0]
+            is_local = provider == "ollama"
+
+            name_text = Text()
+            if is_active:
+                name_text.append("►", style="bold cyan")
+                name_text.append(f" {label}", style="bold cyan")
+            else:
+                name_text.append("  " + label, style="dim white" if not is_local else "green")
+
+            if status == "ACTIVE":
+                status_text = Text("[ACTIVE]", style="bold cyan")
+            elif is_local:
+                status_text = Text("[LOCAL] ", style="bold green")
+            elif "COOLDOWN" in status:
+                status_text = Text("COOLDOWN", style="bold red")
+            else:
+                status_text = Text(status.ljust(7), style="dim white")
+
+            t.add_row(name_text, ctx_label(model), status_text)
+
+        return t
+
+
 class BannerWidget(Static):
     def render(self):
         from rich.text import Text
@@ -373,7 +450,9 @@ class DashboardScreen(Screen):
             yield BannerWidget(id="banner")
             yield GatewayStatusWidget(id="gateway-status")
         with Horizontal(id="main-grid"):
-            yield Static("model panel placeholder", id="model-panel")
+            with Vertical(id="model-panel"):
+                yield Static(" MODEL ROTATION", classes="panel-title")
+                yield ModelTableWidget(id="model-table")
             yield Static("auth panel placeholder", id="auth-panel")
         yield Static(" LOG  [FILTERED]", id="log-header")
         yield RichLog(id="log-panel", highlight=True, markup=True)
