@@ -126,5 +126,70 @@ def fetch_model_status() -> dict | None:
         return None
 
 
+LOG_IMPORTANT_SUBSYSTEMS = {"model", "ratelimit", "fallback", "error", "gateway/reload"}
+
+def _parse_log_line(raw_line: str) -> dict | None:
+    """Parse a single JSONL log line into a display-ready dict."""
+    try:
+        obj = json.loads(raw_line)
+        meta = obj.get("_meta", {})
+        # subsystem is encoded in the "name" field as JSON string
+        name_raw = meta.get("name", "{}")
+        try:
+            name_obj = json.loads(name_raw) if isinstance(name_raw, str) else name_raw
+            subsystem = name_obj.get("subsystem", "unknown").removeprefix("gateway/")
+        except Exception:
+            subsystem = str(name_raw)
+
+        msg_raw = obj.get("1", "")
+        msg = msg_raw if isinstance(msg_raw, str) else json.dumps(msg_raw)
+        level = meta.get("logLevelName", "INFO").upper()
+        ts = obj.get("time", "")[:19].replace("T", " ")
+
+        return {
+            "time": ts,
+            "subsystem": subsystem,
+            "message": msg,
+            "level": level,
+            "important": subsystem in LOG_IMPORTANT_SUBSYSTEMS or level == "ERROR",
+        }
+    except Exception:
+        return None
+
+class LogTailer:
+    """Background thread that tails the gateway JSONL log."""
+
+    def __init__(self, q: queue.Queue):
+        self._q = q
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        while not self._stop.is_set():
+            path = log_path()
+            if not path.exists():
+                self._stop.wait(2)
+                continue
+            try:
+                with open(path, "r") as f:
+                    f.seek(0, 2)  # seek to end
+                    while not self._stop.is_set():
+                        line = f.readline()
+                        if line:
+                            parsed = _parse_log_line(line.strip())
+                            if parsed:
+                                self._q.put(parsed)
+                        else:
+                            self._stop.wait(0.2)
+            except Exception:
+                self._stop.wait(1)
+
+
 if __name__ == "__main__":
     print("scaffold ok")
