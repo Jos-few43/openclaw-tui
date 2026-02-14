@@ -74,6 +74,40 @@ def parse_model_status(raw: dict) -> dict:
         "raw": raw,
     }
 
+def read_auth_profiles(raw: dict | None = None) -> list[dict]:
+    """Read auth-profiles.json and return per-profile dicts with cooldown state."""
+    if raw is None:
+        try:
+            raw = json.loads(AUTH_PROFILES.read_text())
+        except Exception:
+            return []
+
+    profiles_raw = raw.get("profiles", {})
+    usage = raw.get("usageStats", {})
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+
+    result = []
+    for pid, pdata in profiles_raw.items():
+        stats = usage.get(pid, {})
+        cooldown_until = stats.get("cooldownUntil", 0)
+        in_cooldown = cooldown_until > now_ms
+        cooldown_remaining_ms = max(0, cooldown_until - now_ms) if in_cooldown else 0
+
+        result.append({
+            "profile_id": pid,
+            "provider": pdata.get("provider", pid.split(":")[0]),
+            "auth_type": pdata.get("type", "unknown"),
+            "email": pdata.get("email"),
+            "api_key": pdata.get("apiKey", "")[:8] + "..." if pdata.get("apiKey") else None,
+            "expires_ms": pdata.get("expires"),
+            "in_cooldown": in_cooldown,
+            "cooldown_remaining_ms": cooldown_remaining_ms,
+            "error_count": stats.get("errorCount", 0),
+            "last_used_ms": stats.get("lastUsed"),
+        })
+    return result
+
+
 def fetch_model_status() -> dict | None:
     """Run `openclaw models status --json` and return parsed result."""
     try:
